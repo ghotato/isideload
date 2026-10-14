@@ -26,6 +26,9 @@ use crate::{SideloadError, anisette::remote_v3::websocket::AppWebSocket};
 pub const DEFAULT_ANISETTE_V3_URL: &str = "https://ani.jkcoxson.com";
 pub const ANISETTE_STATE_KEY: &str = "windows_anisette_state";
 
+/// User-agent paired with a custom client-info override (see [`RemoteV3AnisetteProvider::set_client_info`]).
+pub const DEFAULT_USER_AGENT: &str = "akd/1.0 CFNetwork/808.1.4";
+
 pub struct RemoteV3AnisetteProvider {
     pub state: Option<AnisetteState>,
     url: String,
@@ -33,6 +36,8 @@ pub struct RemoteV3AnisetteProvider {
     serial_number: String,
     client: reqwest_middleware::ClientWithMiddleware,
     websocket_proxy: Option<String>,
+    /// When set, overrides the X-Mme-Client-Info fetched from the anisette server.
+    client_info: Option<String>,
 }
 
 impl RemoteV3AnisetteProvider {
@@ -54,6 +59,7 @@ impl RemoteV3AnisetteProvider {
             serial_number,
             client: Self::build_reqwest_client(None)?,
             websocket_proxy: None,
+            client_info: None,
         })
     }
 
@@ -103,6 +109,14 @@ impl RemoteV3AnisetteProvider {
         self.serial_number = serial_number;
         self
     }
+
+    /// Override the X-Mme-Client-Info platform string. When `Some(non-empty)`, this is used
+    /// instead of fetching `/v3/client_info` from the anisette server. `None`/empty keeps the
+    /// server-provided value. Lets the client claim e.g. Windows without changing the server.
+    pub fn set_client_info(mut self, client_info: Option<String>) -> RemoteV3AnisetteProvider {
+        self.client_info = client_info;
+        self
+    }
 }
 
 #[cfg_attr(feature = "wasm", async_trait::async_trait(?Send))]
@@ -118,6 +132,20 @@ impl AnisetteProvider for RemoteV3AnisetteProvider {
 
     // Can be hardcoded, but apple is changing things so much nowadays it makes more sense to just get it from the server
     async fn get_client_info(&self) -> Result<AnisetteClientInfo, Report> {
+        // User-supplied override takes precedence over the server's /v3/client_info.
+        // Trimmed so a stray trailing newline can't corrupt the X-Mme-Client-Info header.
+        if let Some(client_info) = self
+            .client_info
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            return Ok(AnisetteClientInfo {
+                client_info: client_info.to_string(),
+                user_agent: DEFAULT_USER_AGENT.to_string(),
+            });
+        }
+
         let info = self
             .client
             .get(format!("{}/v3/client_info", self.url))
